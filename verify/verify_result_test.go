@@ -54,10 +54,10 @@ func TestVerifyResultWithIndexOption(t *testing.T) {
 		},
 	}
 
-	util.SetIndexMapping("temp", &util.MappingDetails{
-		SourceName: "temp_keyspace",
-		IMapping:   bleve.NewIndexMapping(),
-	})
+	util.SetIndexMappingDetails("temp", "", "temp_keyspace",
+		util.ProcessedIndexParams{
+			IndexMapping: bleve.NewIndexMapping(),
+		})
 
 	v, err := NewVerify("`temp_keyspace`", q.field, q.query, q.options)
 	if err != nil {
@@ -117,11 +117,10 @@ func TestVerifyResultWithoutIndexOption(t *testing.T) {
 }
 
 func TestNewVerifyWithInvalidIndexUUID(t *testing.T) {
-	util.SetIndexMapping("temp", &util.MappingDetails{
-		UUID:       "tempUUID",
-		SourceName: "temp_keyspace",
-		IMapping:   bleve.NewIndexMapping(),
-	})
+	util.SetIndexMappingDetails("temp", "tempUUID", "temp_keyspace",
+		util.ProcessedIndexParams{
+			IndexMapping: bleve.NewIndexMapping(),
+		})
 
 	q := struct {
 		field   string

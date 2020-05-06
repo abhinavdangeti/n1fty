@@ -29,94 +29,146 @@ import (
 
 var bleveMaxResultWindow = int64(10000)
 
-type MappingDetails struct {
-	UUID       string
-	SourceName string
-	IMapping   mapping.IndexMapping
-	DocConfig  *cbft.BleveDocumentConfig
+type mappingDetails struct {
+	uuid       string
+	sourceName string
+	idxMapping *mapping.IndexMappingImpl
+	docConfig  *cbft.BleveDocumentConfig
 }
 
-var mappingsCacheLock sync.RWMutex
-var mappingsCache map[string]*MappingDetails
+var mappingDetailsCacheLock sync.RWMutex
+var mappingDetailsCache map[string]*mappingDetails
 
-var EmptyIndexMapping mapping.IndexMapping
+var defaultIndexMapping mapping.IndexMapping
 
 func init() {
-	mappingsCache = make(map[string]*MappingDetails)
+	mappingDetailsCache = make(map[string]*mappingDetails)
 
-	EmptyIndexMapping = bleve.NewIndexMapping()
+	defaultIndexMapping = bleve.NewIndexMapping()
 }
 
-func SetIndexMapping(name string, mappingDetails *MappingDetails) {
-	// TODO: do the callers care that they're blowing away any
-	// existing mapping?  Consider a race where a slow goroutine
-	// incorrectly "wins" by setting an outdated mapping?
-	mappingsCacheLock.Lock()
-	mappingsCache[name] = mappingDetails
-	mappingsCacheLock.Unlock()
-}
-
-func FetchIndexMapping(name, uuid, keyspace string) (mapping.IndexMapping, *cbft.BleveDocumentConfig, error) {
+func FetchIndexMapping(name, uuid, keyspace string) (
+	mapping.IndexMapping, *cbft.BleveDocumentConfig, error) {
 	if len(keyspace) == 0 || len(name) == 0 {
 		// Return default index mapping if keyspace not provided.
-		return EmptyIndexMapping, nil, nil
+		return defaultIndexMapping, nil, nil
 	}
-	mappingsCacheLock.RLock()
-	defer mappingsCacheLock.RUnlock()
-	if info, exists := mappingsCache[name]; exists {
+	mappingDetailsCacheLock.RLock()
+	defer mappingDetailsCacheLock.RUnlock()
+	if md, exists := mappingDetailsCache[name]; exists {
 		// validate sourceName/keyspace, additionally check UUID if provided
-		if info.SourceName == keyspace {
-			if uuid == "" || info.UUID == uuid {
-				return info.IMapping, info.DocConfig, nil
+		if md.sourceName == keyspace {
+			if uuid == "" || md.uuid == uuid {
+				return md.idxMapping, md.docConfig, nil
 			}
 		}
 	}
 	return nil, nil, fmt.Errorf("index mapping not found for: %v", name)
 }
 
-func BuildIndexMappingOnFields(queryFields map[SearchField]struct{}, defaultAnalyzer string,
-	defaultDateTimeParser string) mapping.IndexMapping {
-	var build func(field SearchField, m *mapping.DocumentMapping) *mapping.DocumentMapping
-	build = func(field SearchField, m *mapping.DocumentMapping) *mapping.DocumentMapping {
-		subs := strings.SplitN(field.Name, ".", 2)
-		if _, exists := m.Properties[subs[0]]; !exists {
-			m.Properties[subs[0]] = &mapping.DocumentMapping{
-				Enabled:    true,
-				Properties: make(map[string]*mapping.DocumentMapping),
-			}
-		}
+func SetIndexMappingDetails(indexName, indexUUID, sourceName string,
+	pip ProcessedIndexParams) {
+	// TODO: do the callers care that they're blowing away any
+	// existing mapping?  Consider a race where a slow goroutine
+	// incorrectly "wins" by setting an outdated mapping?
 
-		analyzer := field.Analyzer
-		if field.Type == "text" && analyzer == "" {
-			analyzer = defaultAnalyzer
-		}
-		dateFormat := field.DateFormat
-		if field.Type == "datetime" && dateFormat == "" {
-			dateFormat = defaultDateTimeParser
-		}
-
-		if len(subs) == 1 {
-			m.Properties[subs[0]].Fields = append(m.Fields, &mapping.FieldMapping{
-				Name:               field.Name,
-				Type:               field.Type,
-				Analyzer:           analyzer,
-				DateFormat:         dateFormat,
-				Index:              true,
-				IncludeTermVectors: true,
-			})
-		} else {
-			// length == 2
-			m.Properties[subs[0]] = build(SearchField{
-				Name:       subs[1],
-				Type:       field.Type,
-				Analyzer:   analyzer,
-				DateFormat: dateFormat,
-			}, m.Properties[subs[0]])
-		}
-
-		return m
+	md := &mappingDetails{
+		uuid:       indexUUID,
+		sourceName: sourceName,
+		docConfig:  pip.DocConfig,
 	}
 
+	if !pip.MultipleTypeStrs ||
+		(pip.DocConfig != nil &&
+			(pip.DocConfig.Mode != "type_field" || len(pip.DocConfig.TypeField) == 0)) {
+		// In case of single type mapping or if the DocConfig mode isn't "type_field",
+		// stash the index mapping as is.
+		md.idxMapping = pip.IndexMapping
+	} else {
+		// In the event that there are multiple type mappings within this
+		// index definition, the "type" field needs to be searchable to avoid
+		// false positivies in the verify/eval phase.
+		//
+		// To achieve this we will build an default mapping with all the necessary
+		// search fields along with the "type" field indexed within it.
+		md.idxMapping = bleve.NewIndexMapping()
+		docMapping := &mapping.DocumentMapping{
+			Enabled:    true,
+			Properties: make(map[string]*mapping.DocumentMapping),
+		}
+
+		if len(pip.SearchFields) == 0 || pip.DocConfig == nil {
+			docMapping.Dynamic = true
+		} else {
+			// add the "type" field with the keyword analyzer into SearchFields
+			pip.SearchFields[SearchField{
+				Name:     pip.DocConfig.TypeField,
+				Type:     "text",
+				Analyzer: "keyword",
+			}] = false
+
+			// now add the rest of the fields
+			for field := range pip.SearchFields {
+				if len(field.Name) > 0 {
+					docMapping = buildDocMapping(field, docMapping,
+						pip.DefaultAnalyzer, pip.DefaultDateTimeParser)
+				}
+			}
+		}
+		md.idxMapping.DefaultMapping = docMapping
+		md.idxMapping.DefaultAnalyzer = pip.DefaultAnalyzer
+		md.idxMapping.DefaultDateTimeParser = pip.DefaultDateTimeParser
+	}
+
+	mappingDetailsCacheLock.Lock()
+	mappingDetailsCache[indexName] = md
+	mappingDetailsCacheLock.Unlock()
+}
+
+func buildDocMapping(field SearchField, m *mapping.DocumentMapping,
+	defaultAnalyzer, defaultDateTimeParser string) *mapping.DocumentMapping {
+	subs := strings.SplitN(field.Name, ".", 2)
+	if _, exists := m.Properties[subs[0]]; !exists {
+		m.Properties[subs[0]] = &mapping.DocumentMapping{
+			Enabled:    true,
+			Properties: make(map[string]*mapping.DocumentMapping),
+		}
+	}
+
+	analyzer := field.Analyzer
+	if field.Type == "text" && analyzer == "" {
+		analyzer = defaultAnalyzer
+	}
+	dateFormat := field.DateFormat
+	if field.Type == "datetime" && dateFormat == "" {
+		dateFormat = defaultDateTimeParser
+	}
+
+	if len(subs) == 1 {
+		m.Properties[subs[0]].Fields = append(m.Fields, &mapping.FieldMapping{
+			Name:               field.Name,
+			Type:               field.Type,
+			Analyzer:           analyzer,
+			DateFormat:         dateFormat,
+			Index:              true,
+			IncludeTermVectors: true,
+		})
+	} else {
+		// length == 2
+		m.Properties[subs[0]] = buildDocMapping(SearchField{
+			Name:       subs[1],
+			Type:       field.Type,
+			Analyzer:   analyzer,
+			DateFormat: dateFormat,
+		}, m.Properties[subs[0]], defaultAnalyzer, defaultDateTimeParser)
+	}
+
+	return m
+}
+
+// BuildIndexMappingOnFields API builds on the DefaultMapping within the IndexMapping
+func BuildIndexMappingOnFields(queryFields map[SearchField]struct{}, defaultAnalyzer,
+	defaultDateTimeParser string) mapping.IndexMapping {
 	idxMapping := bleve.NewIndexMapping()
 	docMapping := &mapping.DocumentMapping{
 		Enabled:    true,
@@ -129,7 +181,8 @@ func BuildIndexMappingOnFields(queryFields map[SearchField]struct{}, defaultAnal
 	} else {
 		for field := range queryFields {
 			if len(field.Name) > 0 {
-				docMapping = build(field, docMapping)
+				docMapping = buildDocMapping(field, docMapping,
+					defaultAnalyzer, defaultDateTimeParser)
 			} else {
 				// in case one of the searcher's field name is not provided,
 				// set doc mapping to dynamic and skip processing remaining fields.

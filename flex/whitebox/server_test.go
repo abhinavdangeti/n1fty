@@ -94,11 +94,10 @@ func initIndexesById(t *testing.T, m map[string]*Index) map[string]*Index {
 			idx.CondFlexIndexes = cfis
 		}
 
-		util.SetIndexMapping(idx.Name(), &util.MappingDetails{
-			UUID:       id,
-			SourceName: idx.SourceName,
-			IMapping:   idx.IndexMapping,
-		})
+		util.SetIndexMappingDetails(idx.Name(), id, idx.SourceName,
+			util.ProcessedIndexParams{
+				IndexMapping: idx.IndexMapping,
+			})
 	}
 
 	return m
