@@ -97,6 +97,7 @@ func (v *VerifyCtx) initVerifyCtx() errors.Error {
 
 	var idxMapping mapping.IndexMapping
 	var scope, collection string
+	var typeMappings []string
 	var docConfig *cbft.BleveDocumentConfig
 
 	var indexOptionAvailable bool
@@ -121,7 +122,7 @@ func (v *VerifyCtx) initVerifyCtx() errors.Error {
 				}
 			}
 
-			idxMapping, docConfig, scope, collection, err = util.FetchIndexMapping(
+			idxMapping, docConfig, scope, collection, typeMappings, err = util.FetchIndexMapping(
 				indexVal.Actual().(string), indexUUID, keyspace)
 			if err != nil {
 				return util.N1QLError(nil, "index mapping not found")
@@ -184,6 +185,7 @@ func (v *VerifyCtx) initVerifyCtx() errors.Error {
 	v.docConfig = docConfig
 	v.scope = scope
 	v.collection = collection
+	v.typeMappings = typeMappings
 	v.initialised = true
 
 	return nil
@@ -204,17 +206,18 @@ type VerifyCtx struct {
 	options         value.Value
 	skip            bool
 
-	l           sync.RWMutex
-	initialised bool
-	idx         bleve.Index
-	m           mapping.IndexMapping
-	scope       string
-	collection  string
-	sr          *bleve.SearchRequest
-	udc         *upsidedown.UpsideDownCouch
-	coll        mo.Collection
-	defaultType string
-	docConfig   *cbft.BleveDocumentConfig
+	l            sync.RWMutex
+	initialised  bool
+	idx          bleve.Index
+	m            mapping.IndexMapping
+	scope        string
+	collection   string
+	typeMappings []string
+	sr           *bleve.SearchRequest
+	udc          *upsidedown.UpsideDownCouch
+	coll         mo.Collection
+	defaultType  string
+	docConfig    *cbft.BleveDocumentConfig
 }
 
 func (v *VerifyCtx) Evaluate(item value.Value) (bool, errors.Error) {
@@ -242,7 +245,17 @@ func (v *VerifyCtx) Evaluate(item value.Value) (bool, errors.Error) {
 		bdoc := v.docConfig.BuildDocumentFromObj([]byte(key), doc, v.defaultType)
 		if len(v.scope) > 0 && len(v.collection) > 0 {
 			// decorate type with scope and collection info
-			bdoc.SetType(v.scope + "." + v.collection + "." + bdoc.Type())
+			typ := v.scope + "." + v.collection
+			for _, t := range v.typeMappings {
+				if bdoc.Type() == t {
+					// append type information only if the type mapping specifies a
+					// 'type' and the document's matches it.
+					typ += "." + t
+					break
+				}
+			}
+
+			bdoc.SetType(typ)
 		}
 		doc = bdoc
 	}
